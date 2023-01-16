@@ -6,6 +6,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -14,6 +17,8 @@ import (
 const dbfile = "db/instausers.sqlite3"
 
 var DB *sql.DB
+var ProxyServers []string
+var conNum = 10
 
 type UserData struct {
 	Data struct {
@@ -46,20 +51,28 @@ func chkerr(err error) {
 	}
 }
 
-func makereq(requrl string) []byte {
-	time.Sleep(time.Second * 5)
-	client := &http.Client{}
+func makereq(requrl string, proxyserver string) []byte {
+	time.Sleep(time.Second * 1)
+
+	proxyaddr, _ := url.Parse(proxyserver)
+	httpTransport := &http.Transport{Proxy: http.ProxyURL(proxyaddr)}
+	client := &http.Client{Transport: httpTransport, Timeout: time.Second * 10}
 
 	req, err := http.NewRequest("GET", requrl, nil)
 	chkerr(err)
-	req.Header.Add("User-Agent", "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:106.0) Gecko/20100101 Firefox/106.0")
-	req.Header.Add("X-IG-App-ID", "936619743392459")
+	req.Header.Add("User-Agent", "Instagram 219.0.0.12.117 Android")
+	// req.Header.Add("X-IG-App-ID", "936619743392459")
 
 	resp, err := client.Do(req)
-	chkerr(err)
+	if err != nil {
+		return []byte("")
+	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return []byte("")
+	}
 	return data
 }
 
@@ -85,10 +98,13 @@ func saveUser(userdata UserData) {
 }
 
 func nextUserq() string {
-	query := "select username from usersq limit 1;"
+	query := "select username from usersq where username not in (select username from userstmp) limit 1 ;"
 	row := DB.QueryRow(query, nil)
 	var username string
 	err := row.Scan(&username)
+	chkerr(err)
+	ins := "insert into userstmp values(?);"
+	_, err = DB.Exec(ins, username)
 	chkerr(err)
 	return username
 }
@@ -96,6 +112,9 @@ func nextUserq() string {
 func delUserQ(username string) {
 	delquery := "delete from usersq where username = ?;"
 	_, err := DB.Exec(delquery, username)
+	chkerr(err)
+	delquery = "delete from userstmp where username = ?;"
+	_, err = DB.Exec(delquery, username)
 	chkerr(err)
 }
 
@@ -105,27 +124,67 @@ func initdb() {
 	chkerr(err)
 }
 
-func getUserData(username string) UserData {
+func getUserData(username string, proxyserver string) (UserData, error) {
 	requel := "https://www.instagram.com/api/v1/users/web_profile_info/?username=" + username
-	data := makereq(requel)
+	data := makereq(requel, proxyserver)
 	var userdata UserData
 	err := json.Unmarshal(data, &userdata)
-	chkerr(err)
-	return userdata
+	return userdata, err
+}
+
+func proxyGet(id int, proxyservers []string, username <-chan string, userdata chan<- UserData) {
+	i := 0
+	for {
+		uname := <-username
+		for {
+			proxyserver := proxyservers[i]
+			log.Printf("func[%d]: user %s, proxy %s", id, uname, proxyserver)
+			udat, err := getUserData(uname, proxyserver)
+			if err == nil {
+				userdata <- udat
+				break
+			} else {
+				i = (i + 1) % len(proxyservers)
+			}
+
+		}
+	}
 }
 
 func getinsta() {
-	for {
-		username := nextUserq()
-		log.Println(username)
-		userdata := getUserData(username)
-		saveUser(userdata)
-		delUserQ(username)
+	username := make(chan string)
+	userdat := make(chan UserData)
+	i := 0
+	bracket := len(ProxyServers) / conNum
+	for ; i < conNum-1; i++ {
+		unm := nextUserq()
+		go proxyGet(i, ProxyServers[i*bracket:(i+1)*bracket-1], username, userdat)
+		username <- unm
 	}
+	unm := nextUserq()
+	go proxyGet(i, ProxyServers[i*bracket:(i+1)*bracket-1], username, userdat)
+	username <- unm
+
+	for {
+		userdata := <-userdat
+		saveUser(userdata)
+		delUserQ(userdata.Data.User.Username)
+		log.Println("got user " + userdata.Data.User.Username)
+		unm := nextUserq()
+		username <- unm
+	}
+
+}
+
+func LoadProxyServers() []string {
+	f, err := os.ReadFile("proxy.txt")
+	chkerr(err)
+	return strings.Split(string(f), "\n")
 }
 
 func main() {
 	log.Println("started")
 	initdb()
+	ProxyServers = LoadProxyServers()
 	getinsta()
 }

@@ -77,19 +77,27 @@ func makereq(requrl string, proxyserver string) []byte {
 }
 
 func saveUserRelData(userdata UserData) {
-	insertUsrDat := `INSERT OR IGNORE INTO usersq VALUES(?)`
+	insertUsrDat := `INSERT OR IGNORE INTO usersq VALUES(?);`
 	user := userdata.Data.User
 
 	for _, edge := range user.EdgeRelatedProfiles.Edges {
 		reluser := edge.Node
-		_, err := DB.Exec(insertUsrDat, reluser.Username)
-		chkerr(err)
+		row := DB.QueryRow("SELECT username FROM userdata WHERE username = ?;", reluser.Username)
+		var tmp string
+		err := row.Scan(tmp)
+		if err == sql.ErrNoRows {
+			_, err := DB.Exec(insertUsrDat, reluser.Username)
+			chkerr(err)
+		}
 	}
 }
 
 func saveUser(userdata UserData) {
 	insertUsrDat := `INSERT INTO userdata VALUES(?,?,?,?,?)`
 	user := userdata.Data.User
+	if user.Username == "" {
+		return
+	}
 	_, err := DB.Exec(insertUsrDat, user.Username, user.ID, user.Biography,
 		user.ProfilePic, user.IsPrivate)
 	chkerr(err)
